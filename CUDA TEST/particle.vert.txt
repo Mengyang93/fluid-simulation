@@ -12,6 +12,6 @@ void main()
 {
 	PosWorld = Position;
 	PosCamera = vec3(ViewMatrix * vec4(Position, 1));
-	gl_PointSize = 150 / length(PosCamera);
+	gl_PointSize = 200 / length(PosCamera);
 	gl_Position = ProjViewMatrix * vec4(Position, 1);
 }

@@ -50,7 +50,7 @@ __device__ const float k_corr = 0.0001f;
 __device__ const float deltaq_corr = 0.03f;
 __device__ const int n_corr = 4;
 __device__ const float corrCoefficient = 4.86204e+16f;
-__device__ const int solverIterations = 4;
+__device__ const int solverIterations = 3;
 __device__ const float epsilon = 600.f;
 __device__ const float kernal1 = 1.5667e+09f;
 __device__ const float kernal2 = 1.4324e+07f;
@@ -68,11 +68,6 @@ public:
 	__device__ float33 operator - (float33 vector);
 	__device__ float33 operator * (float number);
 	__device__ float33 operator / (float number);
-
-	__device__ float33 operator += (float33 vector);
-	__device__ float33 operator -= (float33 vector);
-	__device__ float33 operator *= (float number);
-	__device__ float33 operator /= (float number);
 };
 
 __device__ float33 operator * (float number, float33 vector);
@@ -110,7 +105,7 @@ __global__ void addIntoGrid(float *position, float *newPosition, float *velocity
 	atomicAdd(&gridCells[temp * 16 + atomicAdd(&gridCounters[temp], 1)], i);
 }
 
-__global__ void calculateLambda(float *newPosition, int *gridCounters, int *gridCells ,float *lambda, float *test)
+__global__ void calculateLambda(float *newPosition, int *gridCounters, int *gridCells, float *lambda)
 {
 	int i = threadIdx.x + 1024 * blockIdx.x;
 	float numerator = -restDensity, denominator = epsilon * restDensity * restDensity;
@@ -136,7 +131,7 @@ __global__ void calculateLambda(float *newPosition, int *gridCounters, int *grid
 						float33 spike = kernal2 * pow(h - sqrt(distance2), 2) * normalize(pi - pj);
 						numerator += kernal1 * pow(h * h - distance2, 3);
 						denominator += calculateDistance2(spike.x, spike.y, spike.z);
-						sumOfKernal += spike;
+						sumOfKernal = sumOfKernal + spike;
 					}
 				}
 			}
@@ -144,13 +139,12 @@ __global__ void calculateLambda(float *newPosition, int *gridCounters, int *grid
 	}
 	denominator += calculateDistance2(sumOfKernal.x, sumOfKernal.y, sumOfKernal.z);
 	lambda[i] = -floatMin(0.f, numerator) / denominator;
-						test[i] = lambda[i];
 }
 
 __global__ void calculateDelta(float *newPosition, int *gridCounters, int *gridCells, float *lambda, float *delta)
 {
 	int i = threadIdx.x + 1024 * blockIdx.x;
-	float33 sumDeltaP = float33(0.f, 0.f, 0.f);
+	float33 sumDelta = float33(0.f, 0.f, 0.f);
 	float33 pi = float33(newPosition[3 * i], newPosition[3 * i + 1], newPosition[3 * i + 2]);
 	float lambdai = lambda[i];
 	int x = intClamp(int((pi.x + 3) * 10), 0, xgrid - 1),
@@ -170,39 +164,39 @@ __global__ void calculateDelta(float *newPosition, int *gridCounters, int *gridC
 					float distance2 = calculateDistance2(pi.x, pj.x, pi.y, pj.y, pi.z, pj.z);
 					if (index != i && distance2 < h * h && distance2 > 0.000001f)
 					{
-						sumDeltaP += (lambdai + lambda[index] - corrCoefficient * pow(h * h - distance2, 3 * n_corr)) * kernal2 * pow(h - sqrt(distance2), 2) * normalize(pi - pj);
+						sumDelta = sumDelta + (lambdai + lambda[index] - corrCoefficient * pow(h * h - distance2, 3 * n_corr)) * kernal2 * pow(h - sqrt(distance2), 2) * normalize(pi - pj);
 					}
 				}
 			}
 		}
 	}
-	delta[3 * i] = sumDeltaP.x;
-	delta[3 * i + 1] = sumDeltaP.y;
-	delta[3 * i + 2] = sumDeltaP.z;
+	delta[3 * i] = sumDelta.x;
+	delta[3 * i + 1] = sumDelta.y;
+	delta[3 * i + 2] = sumDelta.z;
 
-	if (newPosition[3 * i] < xmin)
+	if (pi.x < xmin)
 	{
-		delta[3 * i] += xmin - newPosition[3 * i];
+		delta[3 * i] += xmin - pi.x;
 	}
-	else if (newPosition[3 * i] > xmax)
+	else if (pi.x > xmax)
 	{
-		delta[3 * i] += xmax - newPosition[3 * i];
+		delta[3 * i] += xmax - pi.x;
 	}
-	if (newPosition[3 * i + 1] < ymin)
+	if (pi.y < ymin)
 	{
-		delta[3 * i + 1] += ymin - newPosition[3 * i + 1];
+		delta[3 * i + 1] += ymin - pi.y;
 	}
-	else if (newPosition[3 * i + 1] > ymax)
+	else if (pi.y > ymax)
 	{
-		delta[3 * i + 1] += ymax - newPosition[3 * i + 1];
+		delta[3 * i + 1] += ymax - pi.y;
 	}
-	if (newPosition[3 * i + 2] < zmin)
+	if (pi.z < zmin)
 	{
-		delta[3 * i + 2] += zmin - newPosition[3 * i + 2];
+		delta[3 * i + 2] += zmin - pi.z;
 	}
-	else if (newPosition[3 * i + 2] > zmax)
+	else if (pi.z > zmax)
 	{
-		delta[3 * i + 2] += zmax - newPosition[3 * i + 2];
+		delta[3 * i + 2] += zmax - pi.z;
 	}
 }
 
@@ -226,7 +220,7 @@ __global__ void calculateVelocityAndPosition(float *position, float *velocity, f
 	position[3 * i + 2] = newPosition[3 * i + 2];
 }
 
-void calculatePosition(float *position, float *velocity, float *lambda)
+void calculatePosition(float *position, float *velocity)
 {
 	float *dev_position = 0;
 	float *dev_newPosition = 0;
@@ -235,8 +229,6 @@ void calculatePosition(float *position, float *velocity, float *lambda)
 	int *dev_gridCells = 0;
 	float *dev_lambda = 0;
 	float *dev_delta = 0;
-
-	float *test = 0;
 
 	cudaSetDevice(0);
 
@@ -250,11 +242,6 @@ void calculatePosition(float *position, float *velocity, float *lambda)
 	cudaMalloc((void**)&dev_lambda, particleNumber * sizeof(float));
 	cudaMalloc((void**)&dev_delta, particleNumber * 3 * sizeof(float));
 
-
-	cudaMalloc((void**)&test, particleNumber * sizeof(float));
-	cudaMemset(test, 0, particleNumber * sizeof(int));
-
-
 	cudaMemcpy(dev_position, position, particleNumber * 3 * sizeof(float), cudaMemcpyHostToDevice);
 	cudaMemcpy(dev_velocity, velocity, particleNumber * 3 * sizeof(float), cudaMemcpyHostToDevice);
 
@@ -263,7 +250,7 @@ void calculatePosition(float *position, float *velocity, float *lambda)
 
 	for (int i = 0; i < solverIterations; ++i)
 	{
-		calculateLambda<<<27, 1024>>>(dev_newPosition, dev_gridCounters, dev_gridCells, dev_lambda, test);
+		calculateLambda<<<27, 1024>>>(dev_newPosition, dev_gridCounters, dev_gridCells, dev_lambda);
 		cudaDeviceSynchronize();
 
 		calculateDelta<<<27, 1024>>>(dev_newPosition, dev_gridCounters, dev_gridCells, dev_lambda, dev_delta);
@@ -278,7 +265,6 @@ void calculatePosition(float *position, float *velocity, float *lambda)
 
 	cudaMemcpy(position, dev_position, particleNumber * 3 * sizeof(float), cudaMemcpyDeviceToHost);
 	cudaMemcpy(velocity, dev_velocity, particleNumber * 3 * sizeof(float), cudaMemcpyDeviceToHost);
-	cudaMemcpy(lambda, test, particleNumber * sizeof(float), cudaMemcpyDeviceToHost);
 
 	cudaFree(dev_position);
 	cudaFree(dev_newPosition);
@@ -314,12 +300,13 @@ int main()
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, cwidth, cheight);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, mdepthRenderBuffer);
 
-
+	const int cupParticleNumber = 10000;
 	// Initialize particle value, index and position for openGL
 	float *position = new float[particleNumber * 3];
 	float *velocity = new float[particleNumber * 3]();
 	int *indices = new int[particleNumber];
 	float *lambda = new float[particleNumber];
+	float *cupPosition = new float[cupParticleNumber];
 
 	int number = 0;
 	for (int i = -24; i < 0; ++i)
@@ -328,16 +315,12 @@ int main()
 		{
 			for (int k = -24; k < 0; ++k)
 			{
+				indices[number / 3] = number / 3;
 				position[number++] = 0.11f * i + (rand() % 10000) / 1000000.0f;
 				position[number++] = 0.11f * j + (rand() % 10000) / 1000000.0f;
 				position[number++] = 0.11f * k + (rand() % 10000) / 1000000.0f;
 			}
 		}
-	}
-
-	for (int i = 0; i < particleNumber; i++)
-	{
-		indices[i] = i;
 	}
 
 	int attrPos = glGetAttribLocation(shaderProgram, "Position");
@@ -355,7 +338,6 @@ int main()
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, particleNumber * sizeof(int), indices, GL_STATIC_DRAW);
 
-
 	// render loop
 	double previousTime = glfwGetTime();
 	int currentFrame = 0;
@@ -372,15 +354,7 @@ int main()
 			accumulateTime = accumulateTime - deltaTimeFrame;
 			if (currentFrame < totalFrame)
 			{
-				calculatePosition(position, velocity, lambda);
-				
-				int N = 100;
-				for (int j = 1; j < particleNumber / N; ++j)
-				{
-					if (lambda[j * N] > 0 || lambda[j * N] < 0)
-					std::cout << lambda[j * N] << ' ';
-				}
-				std::cout << std::endl;
+				calculatePosition(position, velocity);
 			}
 			currentFrame++;
 			if (currentFrame == totalFrame)
@@ -441,31 +415,6 @@ int main()
 	glDeleteBuffers(1, &EBO);
 	glfwTerminate();
 
-	/*
-	std::ofstream fout;
-	fout.open("test.txt");
-	fout << particleNumber << " " << totalFrame / 5 << " ";
-
-
-
-		if (i / 5 == 0)
-		{
-			for (int j = 0; j < particleNumber; ++j)
-			{
-				fout << position[3 * j] << " " << position[3 * j + 1] << " " << position[3 * j + 2] << " ";
-			}
-		}
-
-	fout.close();
-
-	
-	for (int i = 1; i <= totalFrame; ++i)
-	{
-		std::cout << "Current frame is " << i << std::endl;
-		calculatePosition(position, velocity);
-	}
-	*/
-
     cudaDeviceReset();
 	return 0;
 }
@@ -489,26 +438,6 @@ __device__ float33 float33::operator * (float number)
 __device__ float33 float33::operator / (float number)
 {
 	return float33(x / number, y / number, z / number);
-}
-
-__device__ float33 float33::operator += (float33 vector)
-{
-	return *this + vector;
-}
-
-__device__ float33 float33::operator -= (float33 vector)
-{
-	return *this - vector;
-}
-
-__device__ float33 float33::operator *= (float number)
-{
-	return *this * number;
-}
-
-__device__ float33 float33::operator /= (float number)
-{
-	return *this / number;
 }
 
 __device__ float33 operator * (float number, float33 vector)
