@@ -1,0 +1,17 @@
+#version 330 core
+
+uniform mat4 ProjViewMatrix;
+uniform mat4 ViewMatrix;
+
+in vec3 Position;
+
+out vec3 PosCamera;
+out vec3 PosWorld;
+
+void main()
+{
+	PosWorld = Position;
+	PosCamera = vec3(ViewMatrix * vec4(Position, 1));
+	gl_PointSize = 150 / length(PosCamera);
+	gl_Position = ProjViewMatrix * vec4(Position, 1);
+}
