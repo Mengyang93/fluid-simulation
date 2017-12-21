@@ -22,27 +22,24 @@ const unsigned int SCR_HEIGHT = 1600;
 int cwidth = 2000, cheight = 1600;
 const float deltaTimeFrame = 0.016f;
 
-
 // Camera setting initialization
 Camera camera = Camera(cwidth, cheight, glm::vec3(0, 5, 10), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
 glm::vec2 mousePosition(0.f, 0.f);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 
-
-const int xgrid = 80;
+const int xgrid = 60;
 const int ygrid = 80;
-const int zgrid = 40;
-const int gridNumber = 256000;
+const int zgrid = 60;
+const int gridNumber = 288000;
 const int particleNumber = 27648;
-const int totalFrame = 10000;
 __device__ const float deltaTime = 0.008f;
 
 __device__ const float xmin = -3.f;
-__device__ const float xmax = 5.f;
-__device__ const float ymin = -3.f;
-__device__ const float ymax = 5.f;
+__device__ const float xmax = 3.f;
+__device__ const float ymin = -4.f;
+__device__ const float ymax = 4.f;
 __device__ const float zmin = -3.f;
-__device__ const float zmax = 1.f;
+__device__ const float zmax = 3.f;
 
 __device__ const float restDensity = 6378.f;
 __device__ const float h = 0.1f;
@@ -50,7 +47,7 @@ __device__ const float k_corr = 0.0001f;
 __device__ const float deltaq_corr = 0.03f;
 __device__ const int n_corr = 4;
 __device__ const float corrCoefficient = 4.86204e+16f;
-__device__ const int solverIterations = 3;
+__device__ const int solverIterations = 6;
 __device__ const float epsilon = 600.f;
 __device__ const float kernal1 = 1.5667e+09f;
 __device__ const float kernal2 = 1.4324e+07f;
@@ -80,147 +77,17 @@ __device__ int intClamp(int number, int min, int max);
 __device__ int intMax(int number1, int number2);
 __device__ int intMin(int number1, int number2);
 __device__ float floatMin(float number1, float number2);
+__device__ float calculateDistance2(float x1, float x2, float y1, float y2, float z1, float z2);
+__device__ float calculateDistance2(float x, float y, float z);
 
-__device__ float calculateDistance2(float x1, float x2, float y1, float y2, float z1, float z2)
-{
-	return (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2) + (z1 - z2) * (z1 - z2);
-}
+__global__ void addIntoGrid(float *position, float *newPosition, float *velocity, int *gridCounters, int *gridCells);
+__global__ void cupAddIntoGrid(float *cupPosition, int *gridCounters, int *gridCells, int cupNumber);
+__global__ void calculateLambda(float *newPosition, int *gridCounters, int *gridCells, float *lambda, float *cupPosition);
+__global__ void calculateDelta(float *newPosition, int *gridCounters, int *gridCells, float *lambda, float *delta, float *cupPosition);
+__global__ void calculatePredictedPosition(float *newPosition, float *delta);
+__global__ void calculateVelocityAndPosition(float *position, float *velocity, float *newPosition);
 
-__device__ float calculateDistance2(float x, float y, float z)
-{
-	return x * x + y * y + z * z;
-}
-
-__global__ void addIntoGrid(float *position, float *newPosition, float *velocity, int *gridCounters, int *gridCells)
-{
-    int i = threadIdx.x + 1024 * blockIdx.x;
-	velocity[3 * i + 1] -= deltaTime * 9.8f;
-	newPosition[3 * i] = position[3 * i] + deltaTime * velocity[3 * i];
-	newPosition[3 * i + 1] = position[3 * i + 1] + deltaTime * velocity[3 * i + 1];
-	newPosition[3 * i + 2] = position[3 * i + 2] + deltaTime * velocity[3 * i + 2];
-
-	int temp = intClamp(int((newPosition[3 * i] + 3) * 10), 0, xgrid - 1) * ygrid * zgrid
-		     + intClamp(int((newPosition[3 * i + 1] + 3) * 10), 0, ygrid - 1) * zgrid
-		     + intClamp(int((newPosition[3 * i + 2] + 3) * 10), 0, zgrid - 1);
-	atomicAdd(&gridCells[temp * 16 + atomicAdd(&gridCounters[temp], 1)], i);
-}
-
-__global__ void calculateLambda(float *newPosition, int *gridCounters, int *gridCells, float *lambda)
-{
-	int i = threadIdx.x + 1024 * blockIdx.x;
-	float numerator = -restDensity, denominator = epsilon * restDensity * restDensity;
-	float33 sumOfKernal = float33(0.f, 0.f, 0.f);
-	float33 pi = float33(newPosition[3 * i], newPosition[3 * i + 1], newPosition[3 * i + 2]);
-	int x = intClamp(int((pi.x + 3) * 10), 0, xgrid - 1),
-		y = intClamp(int((pi.y + 3) * 10), 0, ygrid - 1),
-		z = intClamp(int((pi.z + 3) * 10), 0, zgrid - 1);
-	for (int ni = intMax(0, x - 1); ni <= intMin(xgrid - 1, x + 1); ++ni)
-	{
-		for (int nj = intMax(0, y - 1); nj <= intMin(ygrid - 1, y + 1); ++nj)
-		{
-			for (int nk = intMax(0, z - 1); nk <= intMin(zgrid - 1, z + 1); ++nk)
-			{
-				int temp = ni * ygrid * zgrid + nj * zgrid + nk;
-				for (int j = 0; j < gridCounters[temp]; ++j)
-				{
-					int index = gridCells[temp * 16 + j];
-					float33 pj = float33(newPosition[3 * index], newPosition[3 * index + 1], newPosition[3 * index + 2]);
-					float distance2 = calculateDistance2(pi.x, pj.x, pi.y, pj.y, pi.z, pj.z);
-					if (index != i && distance2 < h * h && distance2 > 0.000001f)
-					{
-						float33 spike = kernal2 * pow(h - sqrt(distance2), 2) * normalize(pi - pj);
-						numerator += kernal1 * pow(h * h - distance2, 3);
-						denominator += calculateDistance2(spike.x, spike.y, spike.z);
-						sumOfKernal = sumOfKernal + spike;
-					}
-				}
-			}
-		}
-	}
-	denominator += calculateDistance2(sumOfKernal.x, sumOfKernal.y, sumOfKernal.z);
-	lambda[i] = -floatMin(0.f, numerator) / denominator;
-}
-
-__global__ void calculateDelta(float *newPosition, int *gridCounters, int *gridCells, float *lambda, float *delta)
-{
-	int i = threadIdx.x + 1024 * blockIdx.x;
-	float33 sumDelta = float33(0.f, 0.f, 0.f);
-	float33 pi = float33(newPosition[3 * i], newPosition[3 * i + 1], newPosition[3 * i + 2]);
-	float lambdai = lambda[i];
-	int x = intClamp(int((pi.x + 3) * 10), 0, xgrid - 1),
-		y = intClamp(int((pi.y + 3) * 10), 0, ygrid - 1),
-		z = intClamp(int((pi.z + 3) * 10), 0, zgrid - 1);
-	for (int ni = intMax(0, x - 1); ni <= intMin(xgrid - 1, x + 1); ++ni)
-	{
-		for (int nj = intMax(0, y - 1); nj <= intMin(ygrid - 1, y + 1); ++nj)
-		{
-			for (int nk = intMax(0, z - 1); nk <= intMin(zgrid - 1, z + 1); ++nk)
-			{
-				int temp = ni * ygrid * zgrid + nj * zgrid + nk;
-				for (int j = 0; j < gridCounters[temp]; ++j)
-				{
-					int index = gridCells[temp * 16 + j];
-					float33 pj = float33(newPosition[3 * index], newPosition[3 * index + 1], newPosition[3 * index + 2]);
-					float distance2 = calculateDistance2(pi.x, pj.x, pi.y, pj.y, pi.z, pj.z);
-					if (index != i && distance2 < h * h && distance2 > 0.000001f)
-					{
-						sumDelta = sumDelta + (lambdai + lambda[index] - corrCoefficient * pow(h * h - distance2, 3 * n_corr)) * kernal2 * pow(h - sqrt(distance2), 2) * normalize(pi - pj);
-					}
-				}
-			}
-		}
-	}
-	delta[3 * i] = sumDelta.x;
-	delta[3 * i + 1] = sumDelta.y;
-	delta[3 * i + 2] = sumDelta.z;
-
-	if (pi.x < xmin)
-	{
-		delta[3 * i] += xmin - pi.x;
-	}
-	else if (pi.x > xmax)
-	{
-		delta[3 * i] += xmax - pi.x;
-	}
-	if (pi.y < ymin)
-	{
-		delta[3 * i + 1] += ymin - pi.y;
-	}
-	else if (pi.y > ymax)
-	{
-		delta[3 * i + 1] += ymax - pi.y;
-	}
-	if (pi.z < zmin)
-	{
-		delta[3 * i + 2] += zmin - pi.z;
-	}
-	else if (pi.z > zmax)
-	{
-		delta[3 * i + 2] += zmax - pi.z;
-	}
-}
-
-__global__ void calculatePredictedPosition(float *newPosition, float *delta)
-{
-	int i = threadIdx.x + 1024 * blockIdx.x;
-	newPosition[3 * i] += delta[3 * i];
-	newPosition[3 * i + 1] += delta[3 * i + 1];
-	newPosition[3 * i + 2] += delta[3 * i + 2];
-}
-
-__global__ void calculateVelocityAndPosition(float *position, float *velocity, float *newPosition)
-{
-	int i = threadIdx.x + 1024 * blockIdx.x;
-	velocity[3 * i] = (newPosition[3 * i] - position[3 * i]) / deltaTime;
-	velocity[3 * i + 1] = (newPosition[3 * i + 1] - position[3 * i + 1]) / deltaTime;
-	velocity[3 * i + 2] = (newPosition[3 * i + 2] - position[3 * i + 2]) / deltaTime;
-
-	position[3 * i] = newPosition[3 * i];
-	position[3 * i + 1] = newPosition[3 * i + 1];
-	position[3 * i + 2] = newPosition[3 * i + 2];
-}
-
-void calculatePosition(float *position, float *velocity)
+void calculatePosition(float *position, float *velocity, float *cupPosition, int cupNumber)
 {
 	float *dev_position = 0;
 	float *dev_newPosition = 0;
@@ -229,6 +96,7 @@ void calculatePosition(float *position, float *velocity)
 	int *dev_gridCells = 0;
 	float *dev_lambda = 0;
 	float *dev_delta = 0;
+	float *dev_cupPosition = 0;
 
 	cudaSetDevice(0);
 
@@ -241,19 +109,25 @@ void calculatePosition(float *position, float *velocity)
 	//cudaMemset(dev_gridCells, 0, gridNumber * 16 * sizeof(int));
 	cudaMalloc((void**)&dev_lambda, particleNumber * sizeof(float));
 	cudaMalloc((void**)&dev_delta, particleNumber * 3 * sizeof(float));
+	cudaMalloc((void**)&dev_cupPosition, cupNumber * 3 * sizeof(float));
 
 	cudaMemcpy(dev_position, position, particleNumber * 3 * sizeof(float), cudaMemcpyHostToDevice);
 	cudaMemcpy(dev_velocity, velocity, particleNumber * 3 * sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemcpy(dev_cupPosition, cupPosition, cupNumber * 3 * sizeof(float), cudaMemcpyHostToDevice);
 
 	addIntoGrid<<<27, 1024>>>(dev_position, dev_newPosition, dev_velocity, dev_gridCounters, dev_gridCells);
 	cudaDeviceSynchronize();
 
+	//int blockNumber = (cupNumber - 1) / 1024 + 1;
+	//cupAddIntoGrid<<<blockNumber, 1024>>>(dev_cupPosition, dev_gridCounters, dev_gridCells, cupNumber);
+	//cudaDeviceSynchronize();
+
 	for (int i = 0; i < solverIterations; ++i)
 	{
-		calculateLambda<<<27, 1024>>>(dev_newPosition, dev_gridCounters, dev_gridCells, dev_lambda);
+		calculateLambda<<<27, 1024>>>(dev_newPosition, dev_gridCounters, dev_gridCells, dev_lambda, dev_cupPosition);
 		cudaDeviceSynchronize();
 
-		calculateDelta<<<27, 1024>>>(dev_newPosition, dev_gridCounters, dev_gridCells, dev_lambda, dev_delta);
+		calculateDelta<<<27, 1024>>>(dev_newPosition, dev_gridCounters, dev_gridCells, dev_lambda, dev_delta, dev_cupPosition);
 		cudaDeviceSynchronize();
 
 		calculatePredictedPosition<<<27, 1024>>>(dev_newPosition, dev_delta);
@@ -273,6 +147,7 @@ void calculatePosition(float *position, float *velocity)
 	cudaFree(dev_gridCells);
 	cudaFree(dev_lambda);
 	cudaFree(dev_delta);
+	cudaFree(dev_cupPosition);
 }
 
 int main()
@@ -288,11 +163,19 @@ int main()
 	glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
 	glEnable(GL_DEPTH_TEST);
 	glDepthFunc(GL_LESS);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 	// Initialize vertex buffer
 	unsigned int VAO;
 	glGenVertexArrays(1, &VAO);
 	glBindVertexArray(VAO);
+
+	// Initialize uniform parameters
+	int attrPos = glGetAttribLocation(shaderProgram, "Position");
+	int unifProjView = glGetUniformLocation(shaderProgram, "ProjViewMatrix");
+	int unifView = glGetUniformLocation(shaderProgram, "ViewMatrix");
+	int unifColor = glGetUniformLocation(shaderProgram, "ParticleColor");
 
 	// Initialize depth buffer
 	GLuint mdepthRenderBuffer = -1;
@@ -300,13 +183,11 @@ int main()
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, cwidth, cheight);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, mdepthRenderBuffer);
 
-	const int cupParticleNumber = 10000;
 	// Initialize particle value, index and position for openGL
 	float *position = new float[particleNumber * 3];
 	float *velocity = new float[particleNumber * 3]();
 	int *indices = new int[particleNumber];
 	float *lambda = new float[particleNumber];
-	float *cupPosition = new float[cupParticleNumber];
 
 	int number = 0;
 	for (int i = -24; i < 0; ++i)
@@ -316,31 +197,78 @@ int main()
 			for (int k = -24; k < 0; ++k)
 			{
 				indices[number / 3] = number / 3;
-				position[number++] = 0.11f * i + (rand() % 10000) / 1000000.0f;
+				position[number++] = 0.11f * i + (rand() % 10000) / 1000000.0f + 1.f;
 				position[number++] = 0.11f * j + (rand() % 10000) / 1000000.0f;
-				position[number++] = 0.11f * k + (rand() % 10000) / 1000000.0f;
+				position[number++] = 0.11f * k + (rand() % 10000) / 1000000.0f + 1.f;
+			}
+		}
+	}
+	// set up vertex data and configure vertex attributes for water particles
+	unsigned int VBO_water, EBO_water;
+	glGenBuffers(1, &VBO_water);
+	glBindBuffer(GL_ARRAY_BUFFER, VBO_water);
+	glBufferData(GL_ARRAY_BUFFER, particleNumber * 3 * sizeof(float), position, GL_DYNAMIC_DRAW);
+
+	glGenBuffers(1, &EBO_water);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO_water);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, particleNumber * sizeof(int), indices, GL_STATIC_DRAW);
+
+
+
+	float *cupPosition = new float[500000 * 3];
+	int *indicesCup = new int[500000];
+	int cupParticleNumber = 0;
+
+	for (int i = 0; i < 120; ++i)
+	{
+		for (int j = 0; j < 80; ++j)
+		{
+			for (int k = 0; k < 120; ++k)
+			{
+				glm::vec3 location = glm::vec3(i * 0.05f - 3.f, j * 0.05f - 3.f, k * 0.05f - 3.f);
+				float distanceFromAxis = location.x * location.x + location.z * location.z;
+				if (distanceFromAxis > 2.4 * 2.4 && distanceFromAxis < 2.6 * 2.6)
+				{
+					indicesCup[cupParticleNumber / 3] = cupParticleNumber / 3;
+					cupPosition[cupParticleNumber++] = location.x;
+					cupPosition[cupParticleNumber++] = location.y;
+					cupPosition[cupParticleNumber++] = location.z;
+				}
 			}
 		}
 	}
 
-	int attrPos = glGetAttribLocation(shaderProgram, "Position");
-	int unifProjView = glGetUniformLocation(shaderProgram, "ProjViewMatrix");
-	int unifView = glGetUniformLocation(shaderProgram, "ViewMatrix");
+	for (int i = 0; i < 120; ++i)
+	{
+		for (int j = -19; j < 0; ++j)
+		{
+			for (int k = 0; k < 120; ++k)
+			{
+				glm::vec3 location = glm::vec3(i * 0.05f - 3.f, j * 0.05f - 3.f, k * 0.05f - 3.f);
+				float distanceFromCenter = location.x * location.x + (location.y - 2.f) * (location.y - 2.f) + location.z * location.z;
+				if (distanceFromCenter > 5.4 * 5.4 && distanceFromCenter < 5.6 * 5.6)
+				{
+					indicesCup[cupParticleNumber / 3] = cupParticleNumber / 3;
+					cupPosition[cupParticleNumber++] = location.x;
+					cupPosition[cupParticleNumber++] = location.y;
+					cupPosition[cupParticleNumber++] = location.z;
+				}
+			}
+		}
+	}
 
-	// set up vertex data and configure vertex attributes
-	unsigned int VBO, EBO;
+	// set up vertex data and configure vertex attributes for particles for cup particles
+	unsigned int VBO_cup, EBO_cup;
+	glGenBuffers(1, &VBO_cup);
+	glBindBuffer(GL_ARRAY_BUFFER, VBO_cup);
+	glBufferData(GL_ARRAY_BUFFER, cupParticleNumber * sizeof(float), cupPosition, GL_STATIC_DRAW);
 
-	glGenBuffers(1, &VBO);
-	glBindBuffer(GL_ARRAY_BUFFER, VBO);
-	glBufferData(GL_ARRAY_BUFFER, particleNumber * 3 * sizeof(float), position, GL_DYNAMIC_DRAW);
-
-	glGenBuffers(1, &EBO);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, particleNumber * sizeof(int), indices, GL_STATIC_DRAW);
+	glGenBuffers(1, &EBO_cup);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO_cup);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, cupParticleNumber / 3 * sizeof(int), indicesCup, GL_STATIC_DRAW);
 
 	// render loop
 	double previousTime = glfwGetTime();
-	int currentFrame = 0;
 	double accumulateTime = 0;
 
 	while (!glfwWindowShouldClose(window))
@@ -352,15 +280,7 @@ int main()
 		if (accumulateTime >= deltaTimeFrame)
 		{
 			accumulateTime = accumulateTime - deltaTimeFrame;
-			if (currentFrame < totalFrame)
-			{
-				calculatePosition(position, velocity);
-			}
-			currentFrame++;
-			if (currentFrame == totalFrame)
-			{
-				currentFrame = 0;
-			}
+			calculatePosition(position, velocity, cupPosition, cupParticleNumber / 3);
 
 			// input
 			processInput(window);
@@ -368,23 +288,34 @@ int main()
 			// render
 			glClearColor(0.8f, 0.9f, 1.0f, 1.0f);
 			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-
-			glBindBuffer(GL_ARRAY_BUFFER, VBO);
+			
+			glBindBuffer(GL_ARRAY_BUFFER, VBO_water);
 			glBufferData(GL_ARRAY_BUFFER, particleNumber * 3 * sizeof(float), position, GL_DYNAMIC_DRAW);
 			glEnableVertexAttribArray(attrPos);
 			glVertexAttribPointer(attrPos, 3, GL_FLOAT, false, 0, NULL);
 
 			glm::mat4 ProjViewMatrix = camera.getProj() * camera.getView();
 			glm::mat4 ViewMatrix = camera.getView();
-
+			glm::vec4 Blue = glm::vec4(0.3f, 0.34f, 1.f, 1.f);
 			glUniformMatrix4fv(unifProjView, 1, GL_FALSE, &ProjViewMatrix[0][0]);
 			glUniformMatrix4fv(unifView, 1, GL_FALSE, &ViewMatrix[0][0]);
+			glUniform4fv(unifColor, 1, &Blue[0]);
 
-			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO_water);
 			glDrawElements(GL_POINTS, particleNumber, GL_UNSIGNED_INT, 0);
 
+			glBindBuffer(GL_ARRAY_BUFFER, VBO_cup);
+			glBufferData(GL_ARRAY_BUFFER, cupParticleNumber * sizeof(float), cupPosition, GL_DYNAMIC_DRAW);
+			glEnableVertexAttribArray(attrPos);
+			glVertexAttribPointer(attrPos, 3, GL_FLOAT, false, 0, NULL);
 
+			glm::vec4 Green = glm::vec4(0.3f, 1.f, 0.34f, 0.4f);
+			glUniform4fv(unifColor, 1, &Green[0]);
+
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO_cup);
+			glDrawElements(GL_POINTS, cupParticleNumber / 3, GL_UNSIGNED_INT, 0);
+
+			// Mouse Control
 			double xpos, ypos;
 			glfwGetCursorPos(window, &xpos, &ypos);
 			glm::vec2 pos(xpos, ypos);
@@ -411,8 +342,10 @@ int main()
 	}
 	// de-allocate all resources once they've outlived their purpose:
 	glDeleteVertexArrays(1, &VAO);
-	glDeleteBuffers(1, &VBO);
-	glDeleteBuffers(1, &EBO);
+	glDeleteBuffers(1, &VBO_water);
+	glDeleteBuffers(1, &EBO_water);
+	glDeleteBuffers(1, &VBO_cup);
+	glDeleteBuffers(1, &EBO_cup);
 	glfwTerminate();
 
     cudaDeviceReset();
@@ -490,7 +423,15 @@ __device__ int intClamp(int number, int min, int max)
 	return number;
 }
 
+__device__ float calculateDistance2(float x1, float x2, float y1, float y2, float z1, float z2)
+{
+	return (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2) + (z1 - z2) * (z1 - z2);
+}
 
+__device__ float calculateDistance2(float x, float y, float z)
+{
+	return x * x + y * y + z * z;
+}
 
 // process all input: query GLFW whether relevant keys are pressed/released this frame and react accordingly
 // ---------------------------------------------------------------------------------------------------------
@@ -600,7 +541,164 @@ int compileShader()
 
 	return shaderProgram;
 }
+
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 {
 	camera.Zoom(yoffset * 0.1);
+}
+
+__global__ void addIntoGrid(float *position, float *newPosition, float *velocity, int *gridCounters, int *gridCells)
+{
+	int i = threadIdx.x + 1024 * blockIdx.x;
+	velocity[3 * i + 1] -= deltaTime * 9.8f;
+	newPosition[3 * i] = position[3 * i] + deltaTime * velocity[3 * i];
+	newPosition[3 * i + 1] = position[3 * i + 1] + deltaTime * velocity[3 * i + 1];
+	newPosition[3 * i + 2] = position[3 * i + 2] + deltaTime * velocity[3 * i + 2];
+
+	int temp = intClamp(int((newPosition[3 * i] - xmin) * 10), 0, xgrid - 1) * ygrid * zgrid
+		     + intClamp(int((newPosition[3 * i + 1] - ymin) * 10), 0, ygrid - 1) * zgrid
+		     + intClamp(int((newPosition[3 * i + 2] - zmin) * 10), 0, zgrid - 1);
+	atomicAdd(&gridCells[temp * 16 + atomicAdd(&gridCounters[temp], 1)], i);
+}
+
+__global__ void cupAddIntoGrid(float *cupPosition, int *gridCounters, int *gridCells, int cupNumber)
+{
+	int i = threadIdx.x + 1024 * blockIdx.x;
+	if (i < cupNumber)
+	{
+		int temp = intClamp(int((cupPosition[3 * i] - xmin) * 10), 0, xgrid - 1) * ygrid * zgrid
+        		 + intClamp(int((cupPosition[3 * i + 1] - ymin) * 10), 0, ygrid - 1) * zgrid
+			   	 + intClamp(int((cupPosition[3 * i + 2] - zmin) * 10), 0, zgrid - 1);
+		atomicAdd(&gridCells[temp * 16 + atomicAdd(&gridCounters[temp], 1)], i + particleNumber);
+	}
+}
+
+__global__ void calculateLambda(float *newPosition, int *gridCounters, int *gridCells, float *lambda, float *cupPosition)
+{
+	int i = threadIdx.x + 1024 * blockIdx.x;
+	float numerator = -restDensity, denominator = epsilon * restDensity * restDensity;
+	float33 sumOfKernal = float33(0.f, 0.f, 0.f);
+	float33 pi = float33(newPosition[3 * i], newPosition[3 * i + 1], newPosition[3 * i + 2]);
+	int x = intClamp(int((pi.x + 3) * 10), 0, xgrid - 1),
+		y = intClamp(int((pi.y + 3) * 10), 0, ygrid - 1),
+		z = intClamp(int((pi.z + 3) * 10), 0, zgrid - 1);
+	for (int ni = intMax(0, x - 1); ni <= intMin(xgrid - 1, x + 1); ++ni)
+	{
+		for (int nj = intMax(0, y - 1); nj <= intMin(ygrid - 1, y + 1); ++nj)
+		{
+			for (int nk = intMax(0, z - 1); nk <= intMin(zgrid - 1, z + 1); ++nk)
+			{
+				int temp = ni * ygrid * zgrid + nj * zgrid + nk;
+				for (int j = 0; j < gridCounters[temp]; ++j)
+				{
+					int index = gridCells[temp * 16 + j];
+					float33 pj/*;
+					float coefficient = 1.f;
+					if (index < particleNumber) pj*/ = float33(newPosition[3 * index], newPosition[3 * index + 1], newPosition[3 * index + 2]);
+					/*else
+					{
+						pj = float33(cupPosition[3 * (index - particleNumber)], cupPosition[3 * (index - particleNumber) + 1], cupPosition[3 * (index - particleNumber) + 2]);
+						coefficient = 1.f;
+					}*/
+					float distance2 = calculateDistance2(pi.x, pj.x, pi.y, pj.y, pi.z, pj.z);
+					if (index != i && distance2 < h * h && distance2 > 0.000001f)
+					{
+						float33 spike = kernal2 * pow(h - sqrt(distance2), 2) * normalize(pi - pj);
+						numerator += /*coefficient * */kernal1 * pow(h * h - distance2, 3);
+						denominator += calculateDistance2(spike.x, spike.y, spike.z);
+						sumOfKernal = sumOfKernal + spike;
+					}
+				}
+			}
+		}
+	}
+	denominator += calculateDistance2(sumOfKernal.x, sumOfKernal.y, sumOfKernal.z);
+	lambda[i] = -floatMin(0.f, numerator) / denominator;
+}
+
+__global__ void calculateDelta(float *newPosition, int *gridCounters, int *gridCells, float *lambda, float *delta, float *cupPosition)
+{
+	int i = threadIdx.x + 1024 * blockIdx.x;
+	float33 sumDelta = float33(0.f, 0.f, 0.f);
+	float33 pi = float33(newPosition[3 * i], newPosition[3 * i + 1], newPosition[3 * i + 2]);
+	float lambdai = lambda[i];
+	int x = intClamp(int((pi.x + 3) * 10), 0, xgrid - 1),
+		y = intClamp(int((pi.y + 3) * 10), 0, ygrid - 1),
+		z = intClamp(int((pi.z + 3) * 10), 0, zgrid - 1);
+	for (int ni = intMax(0, x - 1); ni <= intMin(xgrid - 1, x + 1); ++ni)
+	{
+		for (int nj = intMax(0, y - 1); nj <= intMin(ygrid - 1, y + 1); ++nj)
+		{
+			for (int nk = intMax(0, z - 1); nk <= intMin(zgrid - 1, z + 1); ++nk)
+			{
+				int temp = ni * ygrid * zgrid + nj * zgrid + nk;
+				for (int j = 0; j < gridCounters[temp]; ++j)
+				{
+					int index = gridCells[temp * 16 + j];
+					float33 pj/*;
+					float coefficient = 1.f;
+					if (index < particleNumber) pj*/ = float33(newPosition[3 * index], newPosition[3 * index + 1], newPosition[3 * index + 2]);
+					/*else
+					{
+						pj = float33(cupPosition[3 * (index - particleNumber)], cupPosition[3 * (index - particleNumber) + 1], cupPosition[3 * (index - particleNumber) + 2]);
+						coefficient = 1.f;
+					}*/
+					float distance2 = calculateDistance2(pi.x, pj.x, pi.y, pj.y, pi.z, pj.z);
+					if (index != i && distance2 < h * h && distance2 > 0.000001f)
+					{
+						sumDelta = sumDelta + (lambdai +/* coefficient * */lambda[index] - corrCoefficient * pow(h * h - distance2, 3 * n_corr)) * kernal2 * pow(h - sqrt(distance2), 2) * normalize(pi - pj);
+					}
+				}
+			}
+		}
+	}
+	delta[3 * i] = sumDelta.x;
+	delta[3 * i + 1] = sumDelta.y;
+	delta[3 * i + 2] = sumDelta.z;
+	
+	if (pi.x < xmin)
+	{
+		delta[3 * i] += xmin - pi.x;
+	}
+	else if (pi.x > xmax)
+	{
+		delta[3 * i] += xmax - pi.x;
+	}
+	if (pi.y < ymin)
+	{
+		delta[3 * i + 1] += ymin - pi.y;
+	}
+	else if (pi.y > ymax)
+	{
+		delta[3 * i + 1] += ymax - pi.y;
+	}
+	if (pi.z < zmin)
+	{
+		delta[3 * i + 2] += zmin - pi.z;
+	}
+	else if (pi.z > zmax)
+	{
+		delta[3 * i + 2] += zmax - pi.z;
+	}
+	
+}
+
+__global__ void calculatePredictedPosition(float *newPosition, float *delta)
+{
+	int i = threadIdx.x + 1024 * blockIdx.x;
+	newPosition[3 * i] += delta[3 * i];
+	newPosition[3 * i + 1] += delta[3 * i + 1];
+	newPosition[3 * i + 2] += delta[3 * i + 2];
+}
+
+__global__ void calculateVelocityAndPosition(float *position, float *velocity, float *newPosition)
+{
+	int i = threadIdx.x + 1024 * blockIdx.x;
+	velocity[3 * i] = (newPosition[3 * i] - position[3 * i]) / deltaTime;
+	velocity[3 * i + 1] = (newPosition[3 * i + 1] - position[3 * i + 1]) / deltaTime;
+	velocity[3 * i + 2] = (newPosition[3 * i + 2] - position[3 * i + 2]) / deltaTime;
+
+	position[3 * i] = newPosition[3 * i];
+	position[3 * i + 1] = newPosition[3 * i + 1];
+	position[3 * i + 2] = newPosition[3 * i + 2];
 }

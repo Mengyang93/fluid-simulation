@@ -1,5 +1,7 @@
 #version 330 core
 
+uniform vec4 ParticleColor;
+
 in vec3 PosCamera;
 in vec3 PosWorld;
 
@@ -17,6 +19,6 @@ void main()
 
     float diffuse = max(0.0, dot(lightDir, n));
 
-    vec3 tempColor = 0.6 * diffuse * vec3(0.3, 0.34, 1.0) + vec3(0.05, 0.05, 0.2f);
-    FragColor = vec4(tempColor, 1.0f);
+    vec4 tempColor = vec4(0.6 * diffuse * vec3(ParticleColor) + vec3(0.05, 0.05, 0.2f), ParticleColor.a);
+    FragColor = tempColor;
 }
